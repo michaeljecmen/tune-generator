@@ -19,15 +19,6 @@ as are 3rds and canonically uglier progressions like ii->viio6->vi).
 
 
 # Usage
-Run this bad boy and put the output into MuseScore or some other DAW.
-Pick your key, but unfortunately only 4 per chord are supported right now,
-so probably stick to 4 4 with 4 quarter notes and one chord per measure, or
-alternatively 4 4 with 8 eighth notes and two half note chords per measure
-if you're looking for something faster paced.
-<br>
-Only consonant intervals are used, so if you're confused about whether or
-not the melody moves up or down at a given point, only steps, leaps of 3rd,
-and leaps of 5th are used. Therefore, if you see 4->1, the melody goes up
-in pitch (because the interval between a 4th and a 1st is a 5th, whereas
-the interval between a 1st and a 4th is a 4th, which is dissonant -- and
-therefore outlawed by my prof).
+First, clone this repo, ```cd tune-generator``` into it, ```sudo apt-get install fluidsynth```, and ```pip install mingus```.
+
+Run with ```python3 gen.py``` and hear your short tune played out! Feel free to mess with the parameters.

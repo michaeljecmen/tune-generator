@@ -2,28 +2,17 @@
 # usage: python gen.py <MIN_BARS> <M/m>
 # argv[2] should be M for major, m for minor
 
-import random
 import sys
-
-# annoying setup code
-major = True
-if len(sys.argv) > 2:
-    major = (sys.argv[2] == "M")
-
-MIN_PROG_LEN = 16
-if len(sys.argv) > 1:
-    MIN_PROG_LEN = int(sys.argv[1])
-
-if "-h" in sys.argv or "--help" in sys.argv:
-    print("usage: python gen.py <MIN_BARS> <M/m>")
-    sys.exit()
+import random
+import time
+from mingus.core import intervals, scales
+from mingus.core import chords as ch
+from mingus.containers import NoteContainer, Note
+from mingus.midi import fluidsynth
 
 major_chords = [ "I", "ii", "iii", "IV", "V", "vi", "viio" ]
 minor_chords = [ "i", "iio", "III", "iv", "V", "vi", "viio" ]
-
 key_chords = major_chords
-if (not major):
-    key_chords = minor_chords
 
 # what chords could feasibly come after this one
 follows = [
@@ -40,7 +29,7 @@ predominants = [ 2, 4 ]
 dominants = [ 5, 7 ]
 
 # number of times to reroll if you get this chord (easier probability manip)
-reroll = [ 0, 1, 3, 0, 0, 1, 2 ]
+reroll = [ 0, 1, 2, 0, 0, 1, 2 ]
 # allow a duplicate chord (i.e. X -> X) _% of the time for this chord
 # generally prefer movement, don't want static bassline
 dupe_probs = [ 25, 5, 1, 15, 5, 10, 1 ]
@@ -54,6 +43,7 @@ chord_tones = [
     [6,1,3],
     [7,2,4]
 ]
+absolute_curr = 0
 
 def ind(chord):
     return chord-1
@@ -135,7 +125,6 @@ def is_trending_down(older, newer):
 #   and note chosen must be consonant interval from bass note of chord
 ABSOLUTE_CEILING = 8
 ABSOLUTE_FLOOR = -8
-absolute_curr = 0
 def is_absolutely_viable(prev, proposed):
     global absolute_curr
     new_abs_curr = absolute_curr + get_note_distance(prev, proposed)
@@ -189,6 +178,7 @@ def get_next_note(prev, curr, chord, consonant):
 def generate_measure(chord, prev_note, prev_prev_note):
     NOTES_PER_CHORD = 4
     measure = []
+    absolute_measure = []
     # assume 4 notes per chord, try to make
     # first and last consonant -> [c ? ? c]
     for i in range(NOTES_PER_CHORD):
@@ -197,16 +187,19 @@ def generate_measure(chord, prev_note, prev_prev_note):
         prev_prev_note = prev_note
         prev_note = temp
         measure.append(temp)
-    return measure, prev_note, prev_prev_note
+        absolute_measure.append(absolute_curr)
+    return measure, absolute_measure, prev_note, prev_prev_note
 
 def generate_notes(prog):
     global absolute_curr
     # song is chord -> notes over chord
     song = []
+    absolutes = [[]]
 
     # do the first bar manually, annoying but necessary
     prev_prev_note = random.choice(chord_tones[ind(prog[0])])
     absolute_curr += get_note_distance(1, prev_prev_note)
+    absolutes[-1].append(absolute_curr)
     prev_note = prev_prev_note+1
     if random.randint(0,1) == 0:
         # coin flip of going up or down to start
@@ -215,21 +208,25 @@ def generate_notes(prog):
             prev_note = 7
     song.append([prev_prev_note, prev_note])
     absolute_curr += get_note_distance(prev_prev_note, prev_note)
+    absolutes[-1].append(absolute_curr)
     temp = get_next_note(prev_prev_note, prev_note, prog[0], False)
+    absolutes[-1].append(absolute_curr)
     # print("traveled from ", prev_note, " to ", temp, ", curr offset = ", absolute_curr)
     prev_prev_note = prev_note
     prev_note = temp
     song[0].append(temp)
     temp = get_next_note(prev_prev_note, prev_note, prog[0], True)
+    absolutes[-1].append(absolute_curr)
     # print("traveled from ", prev_note, " to ", temp, ", curr offset = ", absolute_curr)
     prev_prev_note = prev_note
     prev_note = temp
     song[0].append(temp)
 
     for i in range(1,len(prog)):
-        measure, prev_note, prev_prev_note = generate_measure(prog[i], prev_note, prev_prev_note)
+        measure, absolute_measure, prev_note, prev_prev_note = generate_measure(prog[i], prev_note, prev_prev_note)
         song.append(measure)
-    return song
+        absolutes.append(absolute_measure)
+    return song, absolutes
 
 def print_chords(prog, major = True):
     for c in prog:
@@ -243,7 +240,7 @@ def generate_patternless_song(min_prog_len):
     print_chords(prog)
 
     # song is chord -> notes over chord
-    song = generate_notes(prog)
+    song, _ = generate_notes(prog)
     print(song)
 
 def get_chord_str(chord):
@@ -308,57 +305,147 @@ def get_smoothed_bassline(prog, notes):
     # never invert the final one
     roms[-1] = key_chords[0]
     return roms
+
+def play_song(song_chords, song_notes):
+    # play the song
+    BAR_LENGTH = 2.0 # in seconds
+    fluidsynth.init('/usr/share/sounds/sf2/FluidR3_GM.sf2',"alsa")
+    key = "C"
+    
+    # generate scale and add octave information
+    SCALE_OFFSET = 7
+    scale = scales.Ionian(key, 4).ascending()
+    for i in range(SCALE_OFFSET):
+        scale[i] += '-2'
+    for i in range(SCALE_OFFSET):
+        scale[i+SCALE_OFFSET] += '-3'
+    for i in range(SCALE_OFFSET):
+        scale[i+2*SCALE_OFFSET] += '-4'
+    for i in range(SCALE_OFFSET):
+        scale[i+3*SCALE_OFFSET] += '-5'
+    scale[-1] += '-6'
+    print(scale)      
         
-# make patterns of length 4 or 8 with viable chord prog
-# then do ABA structure, final A slightly changed for effect
-# make sure the patterns have a climax
+    note_ind = 0
+    for chord in song_chords:
+        # invert chords when called for
+        inverted = False
+        double_inverted = False
+        if chord[-1] == '6':
+            chord = chord[:-1]
+            inverted = True
+            if chord[-1] == 'o':
+                chord = chord[:-1]
+                double_inverted = True
+            
+        c = NoteContainer().from_progression_shorthand(chord, key)
 
-# just use the existing functionality and check to see if it
-# happens to meet the above criteria
-PATTERN_LEN = 4
-a_chords = []
-while len(a_chords) != PATTERN_LEN:
-    a_chords = generate_chord_prog(PATTERN_LEN)
-a_notes = generate_notes(a_chords)
+        if inverted:
+            c = ch.invert(c)
+            if double_inverted:
+                c = ch.invert(c)
 
-b_chords = []
-while len(b_chords) != PATTERN_LEN or b_chords == a_chords:
-    b_chords = generate_chord_prog(PATTERN_LEN)
-b_notes = generate_notes(b_chords)
+        # print(c)
+        fluidsynth.play_NoteContainer(c)
 
-print("<A>: ", a_chords)
-print("<B>: ", b_chords)
+        # then play the bar
+        if note_ind < len(song_notes) - 1:
+            bar = song_notes[note_ind]
+            note_ind += 1
+            for note in bar:
+                
+                note = Note(scale[note + 2*SCALE_OFFSET])
+                fluidsynth.play_Note(note)
+                
+                # sleep an even amount of time between notes
+                time.sleep(BAR_LENGTH/len(bar))
+                fluidsynth.stop_Note(note)
 
-song_chords = []
-song_chords.extend(a_chords)
-song_chords.extend(b_chords)
-song_chords.extend(a_chords)
+        else:
+            # play the whole note at end of song
+            note = Note(scale[song_notes[-1][0] + 2*SCALE_OFFSET])
+            fluidsynth.play_Note(note)
+            time.sleep(BAR_LENGTH)
+            fluidsynth.stop_Note(note)
+        
+        # stop the chord for the next bar
+        fluidsynth.stop_NoteContainer(c)
 
-song_notes = []
-song_notes.extend(a_notes)
-song_notes.extend(b_notes)
-song_notes.extend(a_notes)
+def main():
+    # annoying setup code
+    major = True
+    if len(sys.argv) > 2:
+        major = (sys.argv[2] == "M")
 
-# if doesn't end on a 1, append so it now does (chords & notes)
-# because the a section must always end on a pretonic, we need max of one bar
-# to get to a 1 in terms of chords and notes
-if song_chords[-1] != 1:
-    #measure, junk, junk = generate_measure(song_chords[-1], song_notes[-1][-1], song_notes[-1][-2])
+    MIN_PRO_LEN = 16
+    if len(sys.argv) > 1:
+        MIN_PROG_LEN = int(sys.argv[1])
 
-    # but ending on a whole note is also good, why bother for now
-    song_chords.append(1)
-    song_notes.append([1])
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print("usage: python gen.py <MIN_BARS> <M/m>")
+        sys.exit()
 
-# have our basic song with structure now
-print_chords(song_chords)
-print(song_notes)
+    global absolute_curr
+    global key_chords
+    if (not major):
+        key_chords = minor_chords
+            
+    # make patterns of length 4 or 8 with viable chord prog
+    # then do ABA structure, final A slightly changed for effect
+    # make sure the patterns have a climax
 
-print("")
-# now go through and invert shit, smooth out the bassline as much as possible
-song_chords = get_smoothed_bassline(song_chords, song_notes)
-print(song_chords)
-print(song_notes)
+    # just use the existing functionality and check to see if it
+    # happens to meet the above criteria
+    PATTERN_LEN = 4
+    a_chords = []
+    while len(a_chords) != PATTERN_LEN:
+        a_chords = generate_chord_prog(PATTERN_LEN)
+    a_notes, a_abs = generate_notes(a_chords)
 
-# ...and change the rhythm to be more exciting
+    b_chords = []
+    while len(b_chords) != PATTERN_LEN or b_chords == a_chords:
+        b_chords = generate_chord_prog(PATTERN_LEN)
+    b_notes, b_abs = generate_notes(b_chords)
 
-# change chord rhythm for b section?
+    # print("<A>: ", a_chords)
+    # print("<B>: ", b_chords) # TODO fix the note distance function or how absolute curr is updated
+
+    song_chords = []
+    song_chords.extend(a_chords)
+    song_chords.extend(b_chords)
+    song_chords.extend(a_chords)
+
+    song_notes = []
+    song_notes.extend(a_notes)
+    song_notes.extend(b_notes)
+    song_notes.extend(a_notes)
+    
+    absolute_notes = []   
+    absolute_notes.extend(a_abs)
+    absolute_notes.extend(b_abs) # TODO right here use note distance to make the second a_abs add not a huge leap
+    absolute_notes.extend(a_abs)
+
+    # if doesn't end on a 1, append so it now does (chords & notes)
+    # because the a section must always end on a pretonic, we need max of one bar
+    # to get to a 1 in terms of chords and notes
+    if song_chords[-1] != 1:
+        # but ending on a whole note is also good, why bother for now
+        song_chords.append(1)
+        absolute_curr += get_note_distance(song_notes[-1][-1], 1)
+        song_notes.append([1])
+        absolute_notes.append([absolute_curr])
+
+    # have our basic song with structure now
+    # now go through and invert shit, smooth out the bassline as much as possible
+    song_chords = get_smoothed_bassline(song_chords, song_notes) # TODO less I -> V -> I -> V please
+    print(song_chords)
+    print(song_notes)
+    print(absolute_notes)
+
+    # ...and change the rhythm to be more exciting
+    # change chord rhythm for b section?
+
+    play_song(song_chords, absolute_notes)
+
+if __name__ == '__main__':
+    main()
